@@ -66,3 +66,21 @@ def JML(flux, freq, alpha, dist, opang, v=uf(500., 0.), x_0=uf(0.2, 0.),
     part3 = (T_e / 1E4)**-0.075 * um.sin(um.radians(i))**-0.25 * F**-0.75
     
     return part1 * part2 * part3 * 1E-6
+
+def gamma_from_alpha(alpha):
+    # Assume one of three cases, based values for alpha:
+    # Case 1: The standard, spherical model
+    if alpha < 0.8 and alpha >= 0.4:
+        epsilon = 1.
+        q_T = 0.
+        
+    # Case 2: The conical, recombining model
+    elif alpha >= 0.8:
+        epsilon = 1.
+        q_T = -0.5
+    
+    # Case 3: The standard, collimated model
+    else:
+        epsilon = 2. / 3.
+        q_T = 0.
+    return (alpha - 2.) / (1. + epsilon + q_T)
