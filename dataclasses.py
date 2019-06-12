@@ -61,6 +61,9 @@ class Coordinate(astropy.coordinates.SkyCoord):
 
         return sep, pa
 
+    def __sub__(self, coord2):
+        return self.separation(coord2)
+
 class Flux:
     """
     Class to handle radio fluxes
@@ -103,6 +106,45 @@ class Flux:
         else:
             self.obsdate = None
 
+    def __add__(self, flux2):
+        if self._telescope == flux2._telescope:
+            tscope = self._telescope
+        else:
+            tscope = None
+        if self.get_freq() != flux2.get_freq():
+            print("WARNING:: Added fluxes recorded at different frequencies")
+        if self.upper_limit or flux2.upper_limit:
+            ul = True
+        else:
+            ul = False
+        if self.obsdate != flux2.obsdate:
+            print("WARNING:: Added fluxes recorded on different dates")
+            od = None
+        else:
+            od = self.obs_date
+        addflux = self.get_flux() + flux2.get_flux()
+        return Flux(addflux.n, addflux.s, self.get_freq(), AFE=0.0,
+                    telescope=tscope, up_lim=ul, obs_date=od)
+
+    def __sub__(self, flux2):
+        if self._telescope == flux2._telescope:
+            tscope = self._telescope
+        else:
+            tscope = None
+        if self.get_freq() != flux2.get_freq():
+            print("WARNING:: Subtracted fluxes recorded at different frequencies")
+        if self.upper_limit or flux2.upper_limit:
+            ul = True
+        else:
+            ul = False
+        if None in (self.obsdate, flux2.obsdate):
+            dt = None
+        else:
+            dt = self.obsdate - flux2.obsdate
+        addflux = self.get_flux() - flux2.get_flux()
+        return Dflux(addflux.n, addflux.s, self.get_freq(),
+                    telescope=tscope, up_lim=ul, dtime=dt)
+
     def wavelength(self):
         return 299792458.0 / self.get_freq()
 
@@ -110,9 +152,60 @@ class Flux:
         return self.freq + 0
 
     def get_flux(self):
-        return uncertainties.ufloat(self.flux, (self.flux_e**2. +
-                       (self.flux * self.AFE)**2.)**0.5)
+        return uncertainties.ufloat(self.flux,
+                                    (self.flux_e**2. +
+                                     (self.flux * self.AFE)**2.)**0.5)
 
+    @property
+    def telescope(self):
+        return self._telescope
+
+    @telescope.setter
+    def telescope(self, instrument):
+        self._telescope = instrument
+
+class Dflux:
+    def __init__(self, dflux, dflux_err, freq, telescope=None, up_lim=False,
+                 dtime=None):
+        """
+        INPUTS
+        ------
+        dflux     : Flux in Jy (float)
+        dflux_err : Error in radio flux in Jy (float)
+        freq      : Frequency of radio flux in Hz (float)
+        telescope : Telescope used to record flux (None or str)
+        up_lim    : Whether this is an upper limit (boolean)
+        dtime     : When the data was recorded. None by default, otherwise must
+                    be a datetime.timedelta instance
+        """
+        assert isinstance(dflux, float), "dflux needs to be a float"
+        assert isinstance(dflux_err, float), "dflux_err needs to be a float"
+        assert isinstance(freq, float), "freq needs to be a float"
+        assert isinstance(telescope, (str, type(None))),\
+               "telescope needs to be `None' or str"
+        assert type(up_lim) is bool, "up_lim needs to be a bool"
+
+        self.dflux = dflux
+        self.dflux_e = dflux_err
+        self.freq = freq
+        self._telescope = telescope
+        self.upper_limit = up_lim
+        if dtime is not None:
+            assert type(dtime) is datetime.timedelta,\
+                   "dtime needs to be a datetime.timedelta instance"
+            self.dtime = dtime
+        else:
+            self.dtime = None
+
+    def wavelength(self):
+        return 299792458.0 / self.get_freq()
+
+    def get_freq(self):
+        return self.freq + 0
+
+    def get_dflux(self):
+        return uncertainties.ufloat(self.dflux, self.dflux_e)
+           
     @property
     def telescope(self):
         return self._telescope
@@ -285,7 +378,8 @@ class Observation:
                                        absolute_sigma=True)
                 stde = pcov.diagonal()**0.5
                 if uncertainties.umath.isinf(stde[0]):
-                    print('HALLP', uncertainties.ufloat(popt[0], stde[0]), self.myso, self.component)
+                    print('ERROR::', uncertainties.ufloat(popt[0], stde[0]),
+                          self.myso, self.component)
                 self._spix = uncertainties.ufloat(popt[0], stde[0])
         else:
             self._spix = alpha
@@ -324,7 +418,8 @@ class Observation:
                                        absolute_sigma=True)
                 stde = pcov.diagonal()**0.5
                 if uncertainties.umath.isinf(stde[0]):
-                    print('HALLP', uncertainties.ufloat(popt[0], stde[0]), self.myso, self.component)
+                    print('ERROR::', uncertainties.ufloat(popt[0], stde[0]),
+                          self.myso, self.component)
                 self._gamma = uncertainties.ufloat(popt[0], stde[0])
         else:
             self._gamma = g
