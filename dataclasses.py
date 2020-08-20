@@ -10,6 +10,7 @@ import scipy.optimize
 import uncertainties
 import matplotlib.pylab
 import datetime
+import dateutil.parser
 import astropy.coordinates
 from scipy.optimize import curve_fit
 
@@ -44,6 +45,11 @@ class Coordinate(astropy.coordinates.SkyCoord):
         self.decerr = dec_err
         self.freq = freq
         if obs_date is not None:
+            if type(obs_date) is str:
+                try:
+                    obs_date = dateutil.parser.parse(obs_date)
+                except:
+                    pass
             assert type(obs_date) is datetime.datetime,\
                    "obs_date must be instance of datetime.datetime class"
             self.obsdate = obs_date
@@ -91,7 +97,7 @@ class Flux:
         assert isinstance(freq, float), "freq needs to be a float"
         assert isinstance(AFE, float), "AFE needs to be a float"
         assert isinstance(telescope, (str, type(None))),\
-               "telescope needs to be `None' or str"
+               "telescope needs to be None or str"
         assert type(up_lim) is bool, "up_lim needs to be a bool"
         self.flux = flux
         self.flux_e = flux_err
@@ -165,6 +171,9 @@ class Flux:
         self._telescope = instrument
 
 class Dflux:
+    """
+    Class to handle flux differences
+    """
     def __init__(self, dflux, dflux_err, freq, telescope=None, up_lim=False,
                  dtime=None):
         """
@@ -216,7 +225,7 @@ class Dflux:
 
 class Size:
     """
-    Class to handle radio flux dimensions
+    Class to handle radio component dimensions
     """
     def __init__(self, major, major_err, minor, minor_err, pa, pa_err, freq,
                  up_lim=False, obs_date=None):
@@ -305,7 +314,7 @@ class RadioSED:
 
 class Observation:
     """
-    Class to handle all data associated with observation of an MYSO
+    Class to handle all data associated with observation of a radio object
     """
     def __init__(self, name, comp, obj_type, sample, distance, dist_err):
         """
@@ -334,9 +343,9 @@ class Observation:
     @property
     def data(self):
         """
-        Method to insert large datasets (e.g. from a .csv file) into this entry.
-        data_entry should be a dictionary with keys being header values and 
-        values being associated data values.
+        Method to insert large datasets (e.g. from a .csv file) into this
+        entry. data_entry should be a dictionary with keys being header values
+        and values being associated data values
         """
         return self._data
 
@@ -378,7 +387,7 @@ class Observation:
                                        absolute_sigma=True)
                 stde = pcov.diagonal()**0.5
                 if uncertainties.umath.isinf(stde[0]):
-                    print('ERROR::', uncertainties.ufloat(popt[0], stde[0]),
+                    print('WARNING::', uncertainties.ufloat(popt[0], stde[0]),
                           self.myso, self.component)
                 self._spix = uncertainties.ufloat(popt[0], stde[0])
         else:
@@ -418,7 +427,7 @@ class Observation:
                                        absolute_sigma=True)
                 stde = pcov.diagonal()**0.5
                 if uncertainties.umath.isinf(stde[0]):
-                    print('ERROR::', uncertainties.ufloat(popt[0], stde[0]),
+                    print('WARNING::', uncertainties.ufloat(popt[0], stde[0]),
                           self.myso, self.component)
                 self._gamma = uncertainties.ufloat(popt[0], stde[0])
         else:
@@ -437,20 +446,20 @@ class Observation:
         return bol_lum
 
     def jml(self):
-        # JML(flux, freq, alpha, dist, opang)
         """
         Returns the jet mass loss rate in units of M_sol yr^{-1}
         """
         d = uncertainties.ufloat(self.dist, self.dist_e)
         alpha = self.spix + 0
-        if uncertainties.umath.isnan(alpha):
-            self.spix = 'auto'
+        if uncertainties.umath.isnan(self.spix):
+            self.spix = 'auto'  # Determine spectral index
             alpha = self.spix
 
         if uncertainties.umath.isnan(alpha) and 'jet' in self.obj_type.lower():
             alpha = uncertainties.ufloat(0.6, 0.2)
-        #print(alpha)
+            # alpha = uncertainties.ufloat(numpy.nan, numpy.nan)
         jmls = []
+        opangs = []
         for flux in self.fluxes:
             if flux.upper_limit:
                 continue
@@ -458,18 +467,30 @@ class Observation:
             freq = flux.freq / 1E9
 
             opang = uncertainties.ufloat(float('NaN'), float('NaN'))
+            major = uncertainties.ufloat(float('NaN'), float('NaN'))
+            minor = uncertainties.ufloat(float('NaN'), float('NaN'))
             for size in self.sizes:
-                if size.freq == freq:
+                if size.freq in (freq, freq * 1E9):
                     opang = size.opang
+                    major = uncertainties.ufloat(size.major, size.major_e)
+                    minor = uncertainties.ufloat(size.minor, size.minor_e)
+            if not numpy.isnan(opang.s) and not numpy.isnan(opang.n):
+                opangs.append(opang)
+            if alpha > 0.:
+                jmls.append((jf.JML(f, freq, alpha, d, opang),
+                             (f, freq, alpha, d, opang)))
+            else:
+                jmls.append((jf.op_thin_jml(freq, f, major, minor, d,
+                                            geometry='Conical'),
+                             (f, freq, alpha, d, opang)))
 
-            jmls.append((jf.JML(f, freq, alpha, d, opang),
-                         (f, freq, alpha, d, opang)))
+
         return jmls
 
     def s_nu(self, desired_freq):
         """
         Method which returns a function with one argument (frequency) which
-        return flux at that frequency.
+        returns flux at that frequency.
         """
         # Get rid of values that are NaNs or upper limits
         keep_idxs = []
@@ -552,10 +573,15 @@ class Observation:
         self.spix = spix
         return s_nu(desired_freq)
 
-    def tmaj_nu(self, desired_freq):
+    def tmaj_nu(self, desired_freq, guess=False, extrap=True):
         """
         Method which returns a function with one argument (frequency) which
-        return major axis length at that frequency.
+        return major axis length at that frequency. guess arg determines
+        whether to extrapolate sizes if gamma is not measured assuming
+        gamma = -0.7 if alpha is not measured or computing gamma from alpha
+        if it is. extrap arg determines if to interpolate/extrapolate
+        sizes if gamma is measured but no direct measurement at desired_freq
+        is present.
         """
         # Get rid of values that are NaNs or upper limits
         keep_idxs = []
@@ -567,6 +593,11 @@ class Observation:
         freqs = [[_.get_freq() for _ in self.sizes][i] for i in keep_idxs]
         t_majs = [[_.get_major() for _ in self.sizes][i] for i in keep_idxs]
 
+        if desired_freq in freqs:
+            return t_majs[freqs.index(desired_freq)]
+        elif not extrap:
+            return uncertainties.ufloat(numpy.nan, numpy.nan)
+
         # Calculate SPIX and flux function (as lambda)
         if len(t_majs) == 1:
             gam = uncertainties.ufloat(float('NaN'), float('NaN'))
@@ -574,13 +605,15 @@ class Observation:
             tmaj_nu.ref_freq = float('NaN')
             rpr = "float('NaN')"
             if 'jet' in self.obj_type.lower() or 'dw' in self.obj_type.lower():
-                if not uncertainties.umath.isnan(self.spix):
-                    gam = jf.gamma_from_alpha(self.spix)
+                if guess:
+                    if not uncertainties.umath.isnan(self.spix):
+                        gam = jf.gamma_from_alpha(self.spix)
+                    else:
+                        gam = uncertainties.ufloat(-0.7, 0.3)
+                        print(u"Assuming \u03B3 = -0.7 \u00B1 0.3 for " +
+                              self.myso + ", component '" + self.component + "'")
                 else:
-                    gam = uncertainties.ufloat(-0.7, 0.3)
-                    print(u"Assuming \u03B3 = -0.7 \u00B1 0.3 for " +
-                          self.myso + ", component '" + self.component + "'")
-                    # gam = uncertainties.ufloat(float('NaN'), float('NaN'))
+                    gam = uncertainties.ufloat(float('NaN'), float('NaN'))
                 t_maj = t_majs[0]
                 r_freq = freqs[0]
                 tmaj_nu = lambda nu, rf=r_freq, g=gam, t=t_maj: (nu / rf)**g * t
@@ -642,6 +675,7 @@ class Observation:
             rpr = "float('NaN')"
         tmaj_nu.__repr__ = rpr        
         self.gamma = gam
+
         return tmaj_nu(desired_freq)
 
     def add_flux(self, flux):
@@ -657,7 +691,8 @@ class Observation:
                "Added coord must be instance of Coordinate class"
         self.coordinates.append(coord)
 
-    def plot_fluxes(self, ax=None, errorbars=True, save_pdf=False, log=True, **kwargs):
+    def plot_fluxes(self, ax=None, errorbars=True, save_pdf=False, log=True,
+                    **kwargs):
         """
         Plots fluxes of object using matplotlib
         
@@ -675,9 +710,11 @@ class Observation:
 
         uplim_mask = numpy.array([_.upper_limit for _ in self.fluxes])
         
+        created_ax = False
         if ax is None:
             matplotlib.pylab.close('all')
             fig, ax = matplotlib.pylab.subplots(1, 1, figsize=(3.15, 3.15))
+            created_ax = True
 
         if log:
             ax.set_xscale('log')
@@ -685,26 +722,31 @@ class Observation:
 
         # Plot detections
         if errorbars:
-            print(nus[~numpy.array(uplim_mask)])
+            # print(nus[~numpy.array(uplim_mask)])
             ax.errorbar(nus[~numpy.array(uplim_mask)],
                         fs[~numpy.array(uplim_mask)],
-                        yerr=f_es[~numpy.array(uplim_mask)], ls='None',
-                        capsize=2, **kwargs)
-#        else:
-        ax.plot(nus[~numpy.array(uplim_mask)], fs[~numpy.array(uplim_mask)],
-                ls='None', mfc='k', marker='o', **kwargs)
+                        yerr=f_es[~numpy.array(uplim_mask)],
+                        **kwargs)
+        else:
+            ax.plot(nus[~numpy.array(uplim_mask)], fs[~numpy.array(uplim_mask)],
+                    **kwargs)
 
-        # Plot upper-limits
+        # Plot upper-limits of 10% y-axis length
+        uls = 0.1 * numpy.ptp(numpy.log10(ax.get_ylim()))
+        uls = numpy.log10(fs[numpy.array(uplim_mask)]) - uls
+        uls = fs[numpy.array(uplim_mask)] - 10**uls
         ax.errorbar(nus[numpy.array(uplim_mask)], fs[numpy.array(uplim_mask)],
-                    yerr=0.2 * fs[numpy.array(uplim_mask)], uplims=True,
-                    fmt='None', **kwargs)
+                    yerr=uls, uplims=True, **kwargs)
 
         matplotlib.pylab.show()
         
         if save_pdf:
             fig.savefig(save_pdf, dpi=300.)
 
-        return matplotlib.pylab.gcf(), ax
+        if created_ax:
+            return matplotlib.pylab.gcf(), ax, (nus, fs, f_es, uplim_mask)
+        else:
+            return nus, fs, f_es, uplim_mask
 
 if __name__ == '__main__':
     import astropy.units as u
