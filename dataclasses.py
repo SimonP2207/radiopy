@@ -86,18 +86,17 @@ class Flux:
         telescope : Telescope used to record flux (None or str)
         up_lim    : Whether this is an upper limit (boolean)
         obs_date  : When the data was recorded. None by default, otherwise must
-                   be a datetime.datetime instance
+                    be a datetime.datetime instance
         """
-        #assert type(flux) is float, "flux needs to be a float"
-        #assert type(flux_err) is float, "flux_err needs to be a float"
-        #assert type(freq) is float, "freq needs to be a float"
-        #assert type(AFE) is float, "AFE needs to be a float"
+        assert not numpy.isnan(flux), "provided flux must be finite"
+        assert not numpy.isnan(flux_err), "provided flux error must be finite"
+        assert not numpy.isnan(freq), "provided frequency must be finite"
         assert isinstance(flux, float), "flux needs to be a float"
         assert isinstance(flux_err, float), "flux_err needs to be a float"
         assert isinstance(freq, float), "freq needs to be a float"
         assert isinstance(AFE, float), "AFE needs to be a float"
         assert isinstance(telescope, (str, type(None))),\
-               "telescope needs to be None or str"
+                          "telescope needs to be None or str"
         assert type(up_lim) is bool, "up_lim needs to be a bool"
         self.flux = flux
         self.flux_e = flux_err
@@ -111,6 +110,29 @@ class Flux:
             self.obsdate = obs_date
         else:
             self.obsdate = None
+
+    def __str__(self):
+        f = self.get_flux().n
+        fe = self.get_flux().s
+        pow = numpy.floor(numpy.log10(f))
+
+        ss ={'0': u'\u2070', '1': u'\u00B9', '2': u'\u00B2', '3': u'\u00B3',
+             '4': u'\u2074', '5': u'\u2075', '6': u'\u2076', '7': u'\u2077',
+             '8': u'\u2078', '9': u'\u2079', '-': u'\u207B', '+': u'\u207A'}
+
+        pow_uc = ''.join([ss[_] for _ in format(pow, '+03.0f')])
+
+        if not self.upper_limit:
+            s = u'({:.2f}\u00B1{:.2f})\u00D710{} Jy'.format(f / 10**pow,
+                                                            fe / 10**pow,
+                                                            pow_uc)
+        else:
+            s = '<{:.2f}\u00D710{} Jy'.format(f / 10**pow, pow_uc)
+
+        return s
+
+    def __repr__(self):
+        return self.__str__()
 
     def __add__(self, flux2):
         if self._telescope == flux2._telescope:
