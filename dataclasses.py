@@ -5,15 +5,16 @@ Created on Mon Jan 21 16:40:34 2019
 
 @author: purser
 """
+from typing import Union
+from datetime import datetime
 import numpy
 import scipy.optimize
 import uncertainties
 import matplotlib.pylab
-import datetime
 import dateutil.parser
 import astropy.coordinates
 from scipy.optimize import curve_fit
-
+import scipy.constants as con
 
 if __name__ == "__main__":
     import jetfunctions as jf
@@ -28,174 +29,341 @@ else:
 # Attributes that are always exported:
 __all__ = ['Coordinate', 'Flux', 'Size', 'RadioSED', 'Observation']
 
+# TODO: Take obs_date out of Flux, Size etc. and fold into a new observation
+#  class which will use Flux, Size etc. and composite classes
+
+
 class Coordinate(astropy.coordinates.SkyCoord):
-    def __init__(self, ra, dec, ra_err, dec_err, freq, obs_date=None,
+    """
+    astropy.coordinates.SkyCoord child class which modifies SkyCoord's
+    separation and position_angle methods so they return calculated values and
+    their errors
+    """
+
+    def __init__(self, ra: float, dec: float, ra_err: float, dec_err: float,
                  *args, **kwargs):
+        """
+        Constructor method for Coordinate class
+
+        Parameters
+        ----------
+        ra : float
+            Right ascension as float (deg)
+        dec : float
+            Declination as float (deg)
+        ra_err : float
+            Error in right ascension (arcsec)
+        dec_err : float
+            Error in declination (arcsec)
+        """
         # super() method directly inherits method of parent class
         super().__init__(ra, dec, *args, **kwargs)
-        if type(ra_err) is str and miscf.is_float(ra_err):
+
+        if isinstance(ra_err, str) and miscf.is_float(ra_err):
             ra_err = float(ra_err)
-        if type(dec_err) is str and miscf.is_float(dec_err):
+        if isinstance(dec_err, str) is str and miscf.is_float(dec_err):
             dec_err = float(dec_err)
-        if type(ra_err) is str and ra_err in ('', '-'):
+        if isinstance(ra_err, str) and ra_err in ('', '-'):
             ra_err = 0.1
-        if type(dec_err) is str and dec_err in ('', '-'):
+        if isinstance(dec_err, str) and dec_err in ('', '-'):
             dec_err = 0.1
+
         self.raerr = ra_err
         self.decerr = dec_err
-        self.freq = freq
-        if obs_date is not None:
-            if type(obs_date) is str:
-                try:
-                    obs_date = dateutil.parser.parse(obs_date)
-                except:
-                    pass
-            assert type(obs_date) is datetime.datetime,\
-                   "obs_date must be instance of datetime.datetime class"
-            self.obsdate = obs_date
+
+    def separation(self, coord2: Union["Coordinate",
+                                       astropy.coordinates.SkyCoord]) -> uncertainties.ufloat:
+        """
+        Calculate position angle between two Coordinate instances
+
+        Parameters
+        ----------
+        coord2 : Coordinate, astropy.coordinates.SkyCoord
+            Other coordinate to calculate position angle to
+
+        Returns
+        -------
+        uncertainties.ufloat
+            Position angle from self to coord2(deg)
+
+        Raises
+        ------
+        TypeError
+            If arg coord2 is not another Coordinate instance or
+            astropy.coordinates.SkyCoord instance
+        """
+        if isinstance(coord2, Coordinate):
+            return mf.angsep(self, coord2, (self.raerr, self.decerr),
+                             (coord2.raerr, coord2.decerr))
+        elif isinstance(coord2, astropy.coordinate.SkyCoord):
+            return mf.angsep(self, coord2, (self.raerr, self.decerr), (0., 0.))
         else:
-            self.obsdate = None
+            raise TypeError("arg coord2 must be Coordinate or "
+                            "astropy.coordinates.Skycoord instance, not "
+                            f"{type(coord2)}.")
 
-    def separation(self, coord2):
-        if coord2 is None:
-            return None, None
-        # assert isinstance(coord2, Coordinate), "coord2 must be Coordinate instance"
-        sep = mf.angsep(self, coord2, (self.raerr, self.decerr),
-                        (coord2.raerr, coord2.decerr))
-        pa = mf.posang(self, coord2, (self.raerr, self.decerr),
-                       (coord2.raerr, coord2.decerr))
+    def position_angle(self, coord2: Union["Coordinate",
+                                           astropy.coordinates.SkyCoord]) -> uncertainties.ufloat:
+        """
+        Calculate position angle between two Coordinate instances
 
-        return sep, pa
+        Parameters
+        ----------
+        coord2 : Coordinate, astropy.coordinates.SkyCoord
+            Other coordinate to calculate position angle to
+
+        Returns
+        -------
+        uncertainties.ufloat
+            Position angle from self to coord2(deg)
+
+        Raises
+        ------
+        TypeError
+            If arg coord2 is not another Coordinate instance or
+            astropy.coordinates.SkyCoord instance
+        """
+        if isinstance(coord2, Coordinate):
+            return mf.posang(self, coord2, (self.raerr, self.decerr),
+                             (coord2.raerr, coord2.decerr))
+        elif isinstance(coord2, astropy.coordinate.SkyCoord):
+            return mf.posang(self, coord2, (self.raerr, self.decerr), (0., 0.))
+        else:
+            raise TypeError("arg coord2 must be Coordinate or "
+                            "astropy.coordinates.Skycoord instance, not "
+                            f"{type(coord2)}.")
 
     def __sub__(self, coord2):
         return self.separation(coord2)
+
 
 class Flux:
     """
     Class to handle radio fluxes
     """
-    def __init__(self, flux, flux_err, freq, AFE=0.1, telescope=None,
-                 up_lim=False, obs_date=None):
+
+    def __init__(self, flux: float, flux_err: float, freq: float,
+                 afe: float = 0.1, telescope: Union[str, None] = None,
+                 up_lim: bool = False,
+                 obs_date: Union[datetime, None] = None):
         """
-        INPUTS
-        ------
-        flux      : Flux in Jy (float)
-        flux_err  : Error in radio flux in Jy (float)
-        freq      : Frequency of radio flux in Hz (float)
-        AFE       : Fractional absolute flux uncertainty (float)
-        telescope : Telescope used to record flux (None or str)
-        up_lim    : Whether this is an upper limit (boolean)
-        obs_date  : When the data was recorded. None by default, otherwise must
-                    be a datetime.datetime instance
+        Parameters
+        ----------
+        flux : float
+            Flux (Jy)
+        flux_err : float
+            Error in flux (Jy)
+        freq : float
+            Frequency at which flux recorded (float)
+        afe : float, optional
+            Fractional absolute flux uncertainty, by default 0.1
+        telescope : str, None, optional
+            Telescope used for the observation, by default None
+        up_lim : bool, optional
+            Is this an upper-limit? By default False
+        obs_date : datetime, None, optional
+            Date/time the flux was observed, by default None
         """
-        assert not numpy.isnan(flux), "provided flux must be finite"
-        assert not numpy.isnan(flux_err), "provided flux error must be finite"
-        assert not numpy.isnan(freq), "provided frequency must be finite"
+        # Type checks
         assert isinstance(flux, float), "flux needs to be a float"
         assert isinstance(flux_err, float), "flux_err needs to be a float"
         assert isinstance(freq, float), "freq needs to be a float"
-        assert isinstance(AFE, float), "AFE needs to be a float"
-        assert isinstance(telescope, (str, type(None))),\
-                          "telescope needs to be None or str"
-        assert type(up_lim) is bool, "up_lim needs to be a bool"
-        self.flux = flux
-        self.flux_e = flux_err
-        self.freq = freq
-        self.AFE = AFE
+        assert isinstance(afe, float), "afe needs to be a float"
+        assert isinstance(telescope, (str, type(None))), \
+            "telescope needs to be None or str"
+        assert isinstance(up_lim, bool), "up_lim needs to be a bool"
+        assert isinstance(obs_date, (datetime, type(None))), \
+            "obs_date must be instance of datetime class or None"
+
+        # Check and invalidate if NaNs present
+        assert not numpy.isnan(flux), "provided flux must be finite"
+        assert not numpy.isnan(flux_err), "provided flux error must be finite"
+        assert not numpy.isnan(freq), "provided frequency must be finite"
+
+        self._flux = flux
+        self._eflux = flux_err
+        self._freq = freq
+        self._afe = afe
         self._telescope = telescope
-        self.upper_limit = up_lim
-        if obs_date is not None:
-            assert type(obs_date) is datetime.datetime,\
-                   "obs_date must be instance of datetime.datetime class"
-            self.obsdate = obs_date
-        else:
-            self.obsdate = None
+        self._ul = up_lim
+        self._date = obs_date
 
     def __str__(self):
-        f = self.get_flux().n
-        fe = self.get_flux().s
-        pow = numpy.floor(numpy.log10(f))
+        f = self.flux.n
+        fe = self.flux.s
+        power = numpy.floor(numpy.log10(f))
 
-        ss ={'0': u'\u2070', '1': u'\u00B9', '2': u'\u00B2', '3': u'\u00B3',
-             '4': u'\u2074', '5': u'\u2075', '6': u'\u2076', '7': u'\u2077',
-             '8': u'\u2078', '9': u'\u2079', '-': u'\u207B', '+': u'\u207A'}
+        # Superscript unicodes for ease
+        ss = {'0': u'\u2070', '1': u'\u00B9', '2': u'\u00B2', '3': u'\u00B3',
+              '4': u'\u2074', '5': u'\u2075', '6': u'\u2076', '7': u'\u2077',
+              '8': u'\u2078', '9': u'\u2079', '-': u'\u207B', '+': u'\u207A'}
 
-        pow_uc = ''.join([ss[_] for _ in format(pow, '+03.0f')])
+        pow_uc = ''.join([ss[_] for _ in format(power, '+03.0f')])
 
         if not self.upper_limit:
-            s = u'({:.2f}\u00B1{:.2f})\u00D710{} Jy'.format(f / 10**pow,
-                                                            fe / 10**pow,
+            s = u'({:.2f}\u00B1{:.2f})\u00D710{} Jy'.format(f / 10 ** power,
+                                                            fe / 10 ** power,
                                                             pow_uc)
         else:
-            s = '<{:.2f}\u00D710{} Jy'.format(f / 10**pow, pow_uc)
+            s = '<{:.2f}\u00D710{} Jy'.format(f / 10 ** power, pow_uc)
 
         return s
 
     def __repr__(self):
-        return self.__str__()
+        return (f"Flux({self.flux.n:.5e}, {self.flux.s:.5e}, {self.freq:.6e}, "
+                f"afe={self._afe:.2f}, telescope={self.telescope.__repr__()}, "
+                f"up_lim={self.upper_limit}, "
+                f"obs_date={self.obsdate.__repr__()})")
 
     def __add__(self, flux2):
-        if self._telescope == flux2._telescope:
-            tscope = self._telescope
+        if self.telescope == flux2.telescope:
+            tscope = self.telescope
         else:
             tscope = None
-        if self.get_freq() != flux2.get_freq():
+
+        if self.freq != flux2.freq:
+            # TODO: Proper Warning raised here
             print("WARNING:: Added fluxes recorded at different frequencies")
+
         if self.upper_limit or flux2.upper_limit:
             ul = True
         else:
             ul = False
+
         if self.obsdate != flux2.obsdate:
+            # TODO: Proper Warning raised here
             print("WARNING:: Added fluxes recorded on different dates")
+            od = self.obsdate + (flux2.obsdate - self.obsdate) / 2.
+        elif any([self.obsdate is None, flux2.obsdate is None]):
             od = None
         else:
-            od = self.obs_date
-        addflux = self.get_flux() + flux2.get_flux()
-        return Flux(addflux.n, addflux.s, self.get_freq(), AFE=0.0,
-                    telescope=tscope, up_lim=ul, obs_date=od)
+            od = self.obsdate
+
+        sumflux = self.flux + flux2.flux
+
+        return Flux(sumflux.n, sumflux.s, numpy.mean([self.freq, flux2.freq]),
+                    afe=0.0, telescope=tscope, up_lim=ul, obs_date=od)
 
     def __sub__(self, flux2):
-        if self._telescope == flux2._telescope:
+        if self._telescope == flux2.telescope:
             tscope = self._telescope
         else:
             tscope = None
-        if self.get_freq() != flux2.get_freq():
-            print("WARNING:: Subtracted fluxes recorded at different frequencies")
+
+        if self.freq != flux2.freq:
+            # TODO: Proper Warning raised here
+            print(
+                "WARNING:: Subtracted fluxes recorded at different frequencies")
+
         if self.upper_limit or flux2.upper_limit:
             ul = True
         else:
             ul = False
+
         if None in (self.obsdate, flux2.obsdate):
             dt = None
         else:
             dt = self.obsdate - flux2.obsdate
-        addflux = self.get_flux() - flux2.get_flux()
-        return Dflux(addflux.n, addflux.s, self.get_freq(),
-                    telescope=tscope, up_lim=ul, dtime=dt)
 
+        dflux = self.flux - flux2.flux
+
+        return Dflux(dflux.n, dflux.s, numpy.mean([self.freq, flux2.freq]),
+                     telescope=tscope, up_lim=ul, dtime=dt)
+
+    def __mul__(self, n):
+        return Flux(self._flux * n, self._eflux * n, self.freq,
+                    afe=self._afe, telescope=self.telescope,
+                    up_lim=self.upper_limit, obs_date=self.obsdate)
+
+    def __truediv__(self, n):
+        return Flux(self._flux / n, self._eflux / n, self.freq,
+                    afe=self._afe, telescope=self.telescope,
+                    up_lim=self.upper_limit, obs_date=self.obsdate)
+
+    def __eq__(self, flux2):
+        return self.flux.n == flux2.flux.n
+
+    def __gt__(self, flux2):
+        return self.flux.n > flux2.flux.n
+
+    def __lt__(self, flux2):
+        return self.flux.n < flux2.flux.n
+
+    def __ge__(self, flux2):
+        return self.flux.n >= flux2.flux.n
+
+    def __le__(self, flux2):
+        return self.flux.n <= flux2.flux.n
+
+    def __pow__(self, power, modulo=None):
+        return self.flux ** power
+
+    @property
     def wavelength(self):
-        return 299792458.0 / self.get_freq()
+        return 299792458.0 / self.freq
 
-    def get_freq(self):
-        return self.freq + 0
+    @property
+    def freq(self):
+        return self._freq
 
-    def get_flux(self):
-        return uncertainties.ufloat(self.flux,
-                                    (self.flux_e**2. +
-                                     (self.flux * self.AFE)**2.)**0.5)
+    @property
+    def flux(self):
+        return uncertainties.ufloat(self._flux,
+                                    numpy.sqrt(self._eflux ** 2. +
+                                               (self._flux * self._afe) ** 2.))
 
     @property
     def telescope(self):
         return self._telescope
 
-    @telescope.setter
-    def telescope(self, instrument):
-        self._telescope = instrument
+    @property
+    def upper_limit(self):
+        return self._ul
+
+    @property
+    def obsdate(self):
+        return self._date
+
+    def spectral_luminosity(self, dist: uncertainties.ufloat) -> \
+            uncertainties.ufloat:
+        """Calculate spectral luminosity given flux and distance
+
+        Parameters
+        ----------
+        dist : uncertainties.ufloat
+            Distance to source (pc)
+
+        Returns
+        -------
+        uncertainties.ufloat
+            Luminosity in SI units (W Hz^-1)
+        """
+        area = 4. * con.pi * (dist * con.parsec) ** 2.
+
+        return area * self.flux * 1e-26
+
+    def brightness_temperature(self,
+                               omega: Union[float, uncertainties.ufloat]) -> \
+            uncertainties.ufloat:
+        """
+        Flux to Brightness Temperature given solid angle of emitting region
+        Parameters
+        ----------
+        omega : float, uncertainties.ufloat
+            Solid angle of emitting region (sr)
+
+        Returns
+        -------
+        Temperature brightness (K)
+        """
+        return self.wavelength ** 2 / (2. * con.k * omega) * self.flux * 1e-26
+
 
 class Dflux:
     """
     Class to handle flux differences
     """
+
     def __init__(self, dflux, dflux_err, freq, telescope=None, up_lim=False,
                  dtime=None):
         """
@@ -212,8 +380,8 @@ class Dflux:
         assert isinstance(dflux, float), "dflux needs to be a float"
         assert isinstance(dflux_err, float), "dflux_err needs to be a float"
         assert isinstance(freq, float), "freq needs to be a float"
-        assert isinstance(telescope, (str, type(None))),\
-               "telescope needs to be `None' or str"
+        assert isinstance(telescope, (str, type(None))), \
+            "telescope needs to be `None' or str"
         assert type(up_lim) is bool, "up_lim needs to be a bool"
 
         self.dflux = dflux
@@ -222,8 +390,8 @@ class Dflux:
         self._telescope = telescope
         self.upper_limit = up_lim
         if dtime is not None:
-            assert type(dtime) is datetime.timedelta,\
-                   "dtime needs to be a datetime.timedelta instance"
+            assert type(dtime) is datetime.timedelta, \
+                "dtime needs to be a datetime.timedelta instance"
             self.dtime = dtime
         else:
             self.dtime = None
@@ -236,7 +404,7 @@ class Dflux:
 
     def get_dflux(self):
         return uncertainties.ufloat(self.dflux, self.dflux_e)
-           
+
     @property
     def telescope(self):
         return self._telescope
@@ -245,26 +413,16 @@ class Dflux:
     def telescope(self, instrument):
         self._telescope = instrument
 
+
 class Size:
     """
     Class to handle radio component dimensions
     """
-    def __init__(self, major, major_err, minor, minor_err, pa, pa_err, freq,
-                 up_lim=False, obs_date=None):
-        """
-        INPUTS
-        ------
-        major     : Flux (float or NaN)
-        major_err : Error in radio flux (float or NaN)
-        minor     : Flux (float or NaN)
-        minor_err : Error in radio flux (float or NaN)
-        pa        : Flux (float or NaN)
-        pa_err    : Error in radio flux (float or NaN)
-        freq      : Frequency of observation
-        up_lim    : Whether this is an upper limit (boolean)
-        obs_date  : When the data was recorded. None by default, otherwise must
-                    be a datetime.datetime instance
-        """
+
+    def __init__(self, major: float, major_err: float, minor: float,
+                 minor_err: float, pa: float, pa_err: float, freq: float,
+                 up_lim: bool = False,
+                 obs_date: Union[datetime.datetime, None] = None):
         self.major = major
         self.major_e = major_err
         self.minor = minor
@@ -279,8 +437,8 @@ class Size:
                                                                 self.major_e))
         self.opang = uncertainties.umath.degrees(oa)
         if obs_date is not None:
-            assert type(obs_date) is datetime.datetime,\
-                   "obs_date must be instance of datetime.datetime class"
+            assert type(obs_date) is datetime, \
+                "obs_date must be instance of datetime class"
             self.obsdate = obs_date
         else:
             self.obsdate = None
@@ -297,10 +455,20 @@ class Size:
     def get_pa(self):
         return uncertainties.ufloat(self.pa, self.pa_e) + 0
 
+    def area(self) -> uncertainties.ufloat:
+        """
+        Calculates area of component assuming Gaussian morphology in radians
+        """
+        size_as2 = con.pi * self.major * self.minor / (4. * numpy.log(2.))
+
+        return size_as2 * con.arcsec ** 2.
+
+
 class RadioSED:
     """
     Class to handle all fluxes associated with radio source
     """
+
     def __init__(self, fluxes=None):
         if fluxes is None:
             self._fluxes = fluxes
@@ -309,12 +477,14 @@ class RadioSED:
             if type(fluxes) is Flux:
                 self._fluxes = numpy.array([fluxes])
             else:
-                assert isinstance(fluxes, (list, tuple, numpy.ndarray)),\
-                       "fluxes must not be of type " + type(fluxes)
+                assert isinstance(fluxes, (list, tuple, numpy.ndarray)), \
+                    "fluxes must not be of type " + type(fluxes)
                 for flux in fluxes:
-                    assert isinstance(flux, Flux),\
-                           "fluxes elements must be instances of Flux class"
+                    assert isinstance(flux, Flux), \
+                        "fluxes elements must be instances of Flux class"
                 self._fluxes = numpy.array(fluxes)
+
+        self._spix = float('NaN')
 
     @property
     def fluxes(self):
@@ -334,10 +504,186 @@ class RadioSED:
         else:
             self.fluxes = numpy.append(self.fluxes, flux)
 
+    @property
+    def spix(self):
+        """
+        Get spectral index information
+        """
+        if uncertainties.umath.isnan(self._spix):
+            self.spix = 'auto'
+        return self._spix
+
+    @spix.setter
+    def spix(self, alpha):
+        if alpha == 'auto':
+            # Get rid of values that are NaNs or upper limits
+            keep_idxs = []
+            for idx, f in enumerate(self.fluxes):
+                if not uncertainties.umath.isnan(f.get_flux()):
+                    if not f.upper_limit:
+                        keep_idxs.append(idx)
+
+            nus = [[_.get_freq() for _ in self.fluxes][i] for i in keep_idxs]
+            fs = [[_.get_flux() for _ in self.fluxes][i] for i in keep_idxs]
+
+            if len(nus) < 2:
+                self._spix = float('NaN')
+            else:
+                def log_power_law(log_x, m, c):
+                    return log_x * m + c
+
+                popt, pcov = curve_fit(log_power_law,
+                                       [uncertainties.umath.log10(_) for _ in
+                                        nus],
+                                       [uncertainties.umath.log10(_).n for _ in
+                                        fs],
+                                       sigma=[uncertainties.umath.log10(_).s for
+                                              _ in fs],
+                                       absolute_sigma=True)
+                stde = pcov.diagonal() ** 0.5
+                if uncertainties.umath.isinf(stde[0]):
+                    print('WARNING::',
+                          uncertainties.ufloat(popt[0], stde[0]))
+                self._spix = uncertainties.ufloat(popt[0], stde[0])
+        else:
+            self._spix = alpha
+
+    def s_nu(self, desired_freq):
+        """
+        Method which returns a function with one argument (frequency) which
+        returns flux at that frequency.
+        """
+        # Get rid of values that are NaNs or upper limits
+        keep_idxs = []
+        for idx, f in enumerate(self.fluxes):
+            if not uncertainties.umath.isnan(f.get_flux()):
+                if not f.upper_limit:
+                    keep_idxs.append(idx)
+
+        freqs = [[_.get_freq() for _ in self.fluxes][i] for i in keep_idxs]
+        fluxes = [[_.get_flux() for _ in self.fluxes][i] for i in keep_idxs]
+
+        # Calculate SPIX and flux function (as lambda)
+        if len(fluxes) < 2:
+            spix = uncertainties.ufloat(float('NaN'), float('NaN'))
+            s_nu = lambda nu: uncertainties.ufloat(float('NaN'), float('NaN'))
+            s_nu.ref_freq = float('NaN')
+            rpr = "float('NaN')"
+
+        # LSQ fit in case of more than 1 frequency
+        elif len(fluxes) >= 2:
+            # Power law whose reference frequency controls the errors more
+            # sensibly, rather than y-intercept dominated errors
+            def tailored_plaw(ref_freq):
+                def plaw(freq, a, c):
+                    return (freq / ref_freq) ** a * c
+
+                return plaw
+
+            # Need to calculate weighted average frequency (r_freq)...            
+            weights = numpy.array([_.s ** -2. for _ in fluxes])
+            tot_weight = numpy.sum(weights)
+            weights /= tot_weight
+
+            r_freq = 10 ** numpy.nansum(weights * numpy.log10(freqs))
+            popt1, pcov1 = scipy.optimize.curve_fit(tailored_plaw(r_freq),
+                                                    freqs,
+                                                    [_.n for _ in fluxes],
+                                                    sigma=[_.s for _ in fluxes],
+                                                    absolute_sigma=True)
+            std_err1 = pcov1.diagonal() ** 0.5
+            spix = uncertainties.ufloat(popt1[0], std_err1[0])
+            s_nu = lambda nu, rf=r_freq, p=popt1, se=std_err1: (
+                                                                           nu / rf) ** uncertainties.ufloat(
+                p[0], se[0]) * uncertainties.ufloat(p[1], se[1])
+            s_nu.ref_freq = r_freq
+            rpr = '('
+            rpr += format(popt1[1], '.2e') + "+/-" + format(std_err1[1], '.2e')
+            rpr += ") * (nu / " + format(r_freq, '.2e')
+            rpr += ")**(" + format(popt1[0], '.2f') + "+/-"
+            rpr += format(std_err1[0], '.2f') + ')'
+            del popt1
+            del pcov1
+            del std_err1
+            del r_freq
+
+        s_nu.__repr__ = rpr
+        self.spix = spix
+
+        return s_nu(desired_freq)
+
+    def plot_fluxes(self, ax=None, errorbars=True, save_pdf=False, log=True,
+                    plot_spix=True, **kwargs):
+        """
+        Plots fluxes of object using matplotlib
+        
+        INPUTS
+        ------
+        errorbars : Whether to plot as errorbars or points
+        save_pdf  : Save copy of plot as .pdf? If a string, should be the full
+                    path to save plot under (False or string)
+        log       : Logarithmic axes? (boolean)
+        **kwargs  : Passed to plotting method of matplotlib
+        """
+        nus = numpy.array([_.get_freq() for _ in self.fluxes])
+        fs = numpy.array([_.get_flux().n for _ in self.fluxes])
+        f_es = numpy.array([_.get_flux().s for _ in self.fluxes])
+
+        uplim_mask = numpy.array([_.upper_limit for _ in self.fluxes])
+
+        created_ax = False
+        if ax is None:
+            matplotlib.pylab.close('all')
+            fig, ax = matplotlib.pylab.subplots(1, 1, figsize=(3.15, 3.15))
+            created_ax = True
+
+        if log:
+            ax.set_xscale('log')
+            ax.set_yscale('log')
+
+            # Plot detections
+        if errorbars:
+            # print(nus[~numpy.array(uplim_mask)])
+            ax.errorbar(nus[~numpy.array(uplim_mask)],
+                        fs[~numpy.array(uplim_mask)],
+                        yerr=f_es[~numpy.array(uplim_mask)],
+                        **kwargs)
+        else:
+            ax.plot(nus[~numpy.array(uplim_mask)], fs[~numpy.array(uplim_mask)],
+                    **kwargs)
+
+        # Plot upper-limits of 10% y-axis length
+        uls = 0.1 * numpy.ptp(numpy.log10(ax.get_ylim()))
+        uls = numpy.log10(fs[numpy.array(uplim_mask)]) - uls
+        uls = fs[numpy.array(uplim_mask)] - 10 ** uls
+        ax.errorbar(nus[numpy.array(uplim_mask)], fs[numpy.array(uplim_mask)],
+                    yerr=uls, uplims=True, **kwargs)
+
+        if not uncertainties.umath.isinf(self.spix) and plot_spix:
+            xlims = ax.get_xlim()
+            ylims = ax.get_ylim()
+            xs = numpy.linspace(*xlims)
+            ys = self.s_nu(xs)
+            ax.plot(xs, [_.n for _ in ys], 'r-')
+            ax.set_xlim(xlims)
+            ax.set_ylim(ylims)
+
+        matplotlib.pylab.show()
+
+        if save_pdf:
+            fig.savefig(save_pdf, dpi=300.)
+
+        if created_ax:
+            return matplotlib.pylab.gcf(), ax, (nus, fs, f_es, uplim_mask)
+        else:
+            return nus, fs, f_es, uplim_mask
+
+
 class Observation:
     """
     Class to handle all data associated with observation of a radio object
     """
+
     def __init__(self, name, comp, obj_type, sample, distance, dist_err):
         """
         INPUTS
@@ -386,6 +732,7 @@ class Observation:
 
     @spix.setter
     def spix(self, alpha):
+        print('SPIXXX :: ', self.myso, self.component)
         if alpha == 'auto':
             # Get rid of values that are NaNs or upper limits
             keep_idxs = []
@@ -393,23 +740,28 @@ class Observation:
                 if not uncertainties.umath.isnan(f.get_flux()):
                     if not f.upper_limit:
                         keep_idxs.append(idx)
-    
+
             nus = [[_.get_freq() for _ in self.fluxes][i] for i in keep_idxs]
             fs = [[_.get_flux() for _ in self.fluxes][i] for i in keep_idxs]
+
             if len(nus) < 2:
                 self._spix = float('NaN')
             else:
-                
                 def log_power_law(log_x, m, c):
                     return log_x * m + c
+
                 popt, pcov = curve_fit(log_power_law,
-                                       [uncertainties.umath.log10(_) for _ in nus],
-                                       [uncertainties.umath.log10(_).n for _ in fs],
-                                       sigma=[uncertainties.umath.log10(_).s for _ in fs],
+                                       [uncertainties.umath.log10(_) for _ in
+                                        nus],
+                                       [uncertainties.umath.log10(_).n for _ in
+                                        fs],
+                                       sigma=[uncertainties.umath.log10(_).s for
+                                              _ in fs],
                                        absolute_sigma=True)
-                stde = pcov.diagonal()**0.5
+                stde = pcov.diagonal() ** 0.5
                 if uncertainties.umath.isinf(stde[0]):
-                    print('WARNING::', uncertainties.ufloat(popt[0], stde[0]),
+                    print('WARNING::',
+                          uncertainties.ufloat(popt[0], stde[0]),
                           self.myso, self.component)
                 self._spix = uncertainties.ufloat(popt[0], stde[0])
         else:
@@ -433,21 +785,25 @@ class Observation:
                 if not uncertainties.umath.isnan(s.get_major()):
                     if not s.upper_limit:
                         keep_idxs.append(idx)
-    
+
             nus = [[_.get_freq() for _ in self.sizes][i] for i in keep_idxs]
             ts = [[_.get_major() for _ in self.sizes][i] for i in keep_idxs]
             if len(nus) < 2:
                 self._gamma = float('NaN')
             else:
-                
+
                 def log_power_law(log_x, m, c):
                     return log_x * m + c
+
                 popt, pcov = curve_fit(log_power_law,
-                                       [uncertainties.umath.log10(_) for _ in nus],
-                                       [uncertainties.umath.log10(_).n for _ in ts],
-                                       sigma=[uncertainties.umath.log10(_).s for _ in ts],
+                                       [uncertainties.umath.log10(_) for _ in
+                                        nus],
+                                       [uncertainties.umath.log10(_).n for _ in
+                                        ts],
+                                       sigma=[uncertainties.umath.log10(_).s for
+                                              _ in ts],
                                        absolute_sigma=True)
-                stde = pcov.diagonal()**0.5
+                stde = pcov.diagonal() ** 0.5
                 if uncertainties.umath.isinf(stde[0]):
                     print('WARNING::', uncertainties.ufloat(popt[0], stde[0]),
                           self.myso, self.component)
@@ -463,7 +819,7 @@ class Observation:
         Calculate bolometric luminosity of MYSO from its bolometric flux
         """
         fbol_uf = uncertainties.ufloat(fbol, fbol_err)
-        bol_lum = 31256404982224.164 * fbol_uf * self.get_dist()**2.
+        bol_lum = 31256404982224.164 * fbol_uf * self.get_dist() ** 2.
         self.lbol = bol_lum + 0
         return bol_lum
 
@@ -506,7 +862,6 @@ class Observation:
                                             geometry='Conical'),
                              (f, freq, alpha, d, opang)))
 
-
         return jmls
 
     def s_nu(self, desired_freq):
@@ -534,7 +889,7 @@ class Observation:
                 alpha = uncertainties.ufloat(0.6, 0.2)
                 flux = fluxes[0]
                 r_freq = freqs[0]
-                s_nu = lambda nu, rf=r_freq, s=alpha, f=flux: (nu / rf)**s * f
+                s_nu = lambda nu, rf=r_freq, s=alpha, f=flux: (nu / rf) ** s * f
                 s_nu.ref_freq = r_freq
                 rpr = '('
                 rpr += format(flux.n, '.2e') + "+/-" + format(flux.s, '.2e')
@@ -545,7 +900,7 @@ class Observation:
                 alpha = uncertainties.ufloat(-0.1, 0.2)
                 flux = fluxes[0]
                 r_freq = freqs[0]
-                s_nu = lambda nu, rf=r_freq, s=alpha, f=flux: (nu / rf)**s * f
+                s_nu = lambda nu, rf=r_freq, s=alpha, f=flux: (nu / rf) ** s * f
                 s_nu.ref_freq = r_freq
                 rpr = '('
                 rpr += format(flux.n, '.2e') + "+/-" + format(flux.s, '.2e')
@@ -559,22 +914,26 @@ class Observation:
             # sensibly, rather than y-intercept dominated errors
             def tailored_plaw(ref_freq):
                 def plaw(freq, a, c):
-                    return (freq / ref_freq)**a * c
+                    return (freq / ref_freq) ** a * c
+
                 return plaw
-            
+
             # Need to calculate weighted average frequency (r_freq)...            
-            weights = numpy.array([_.s**-2. for _ in fluxes])
+            weights = numpy.array([_.s ** -2. for _ in fluxes])
             tot_weight = numpy.sum(weights)
             weights /= tot_weight
 
-            r_freq = 10**numpy.nansum(weights * numpy.log10(freqs))
-            popt1, pcov1 = scipy.optimize.curve_fit(tailored_plaw(r_freq), freqs,
-                                     [_.n for _ in fluxes],
-                                     sigma=[_.s for _ in fluxes],
-                                     absolute_sigma=True)
-            std_err1 = pcov1.diagonal()**0.5
+            r_freq = 10 ** numpy.nansum(weights * numpy.log10(freqs))
+            popt1, pcov1 = scipy.optimize.curve_fit(tailored_plaw(r_freq),
+                                                    freqs,
+                                                    [_.n for _ in fluxes],
+                                                    sigma=[_.s for _ in fluxes],
+                                                    absolute_sigma=True)
+            std_err1 = pcov1.diagonal() ** 0.5
             spix = uncertainties.ufloat(popt1[0], std_err1[0])
-            s_nu = lambda nu, rf=r_freq, p=popt1, se=std_err1: (nu / rf)**uncertainties.ufloat(p[0], se[0]) * uncertainties.ufloat(p[1], se[1])
+            s_nu = lambda nu, rf=r_freq, p=popt1, se=std_err1: (
+                                                                           nu / rf) ** uncertainties.ufloat(
+                p[0], se[0]) * uncertainties.ufloat(p[1], se[1])
             s_nu.ref_freq = r_freq
             rpr = '('
             rpr += format(popt1[1], '.2e') + "+/-" + format(std_err1[1], '.2e')
@@ -591,7 +950,7 @@ class Observation:
             s_nu = lambda nu: uncertainties.ufloat(float('NaN'), float('NaN'))
             s_nu.ref_freq = float('NaN')
             rpr = "float('NaN')"
-        s_nu.__repr__ = rpr        
+        s_nu.__repr__ = rpr
         self.spix = spix
         return s_nu(desired_freq)
 
@@ -623,7 +982,8 @@ class Observation:
         # Calculate SPIX and flux function (as lambda)
         if len(t_majs) == 1:
             gam = uncertainties.ufloat(float('NaN'), float('NaN'))
-            tmaj_nu = lambda nu: uncertainties.ufloat(float('NaN'), float('NaN'))
+            tmaj_nu = lambda nu: uncertainties.ufloat(float('NaN'),
+                                                      float('NaN'))
             tmaj_nu.ref_freq = float('NaN')
             rpr = "float('NaN')"
             if 'jet' in self.obj_type.lower() or 'dw' in self.obj_type.lower():
@@ -638,7 +998,8 @@ class Observation:
                     gam = uncertainties.ufloat(float('NaN'), float('NaN'))
                 t_maj = t_majs[0]
                 r_freq = freqs[0]
-                tmaj_nu = lambda nu, rf=r_freq, g=gam, t=t_maj: (nu / rf)**g * t
+                tmaj_nu = lambda nu, rf=r_freq, g=gam, t=t_maj: (
+                                                                            nu / rf) ** g * t
                 tmaj_nu.ref_freq = r_freq
                 rpr = '('
                 rpr += format(t_maj.n, '.2e') + "+/-" + format(t_maj.s, '.2e')
@@ -649,7 +1010,8 @@ class Observation:
                 gam = uncertainties.ufloat(0., 0.)
                 t_maj = t_majs[0]
                 r_freq = freqs[0]
-                tmaj_nu = lambda nu, rf=r_freq, g=gam, t=t_maj: (nu / rf)**g * t
+                tmaj_nu = lambda nu, rf=r_freq, g=gam, t=t_maj: (
+                                                                            nu / rf) ** g * t
                 tmaj_nu.ref_freq = r_freq
                 rpr = '('
                 rpr += format(t_maj.n, '.2e') + "+/-" + format(t_maj.s, '.2e')
@@ -663,22 +1025,26 @@ class Observation:
             # sensibly, rather than y-intercept dominated errors
             def tailored_plaw(ref_freq):
                 def plaw(freq, a, c):
-                    return (freq / ref_freq)**a * c
+                    return (freq / ref_freq) ** a * c
+
                 return plaw
-            
+
             # Need to calculate weighted average frequency (r_freq)...            
-            weights = numpy.array([_.s**-2. for _ in t_majs])
+            weights = numpy.array([_.s ** -2. for _ in t_majs])
             tot_weight = numpy.sum(weights)
             weights /= tot_weight
 
-            r_freq = 10**numpy.nansum(weights * numpy.log10(freqs))
-            popt1, pcov1 = scipy.optimize.curve_fit(tailored_plaw(r_freq), freqs,
-                                     [_.n for _ in t_majs],
-                                     sigma=[_.s for _ in t_majs],
-                                     absolute_sigma=True)
-            std_err1 = pcov1.diagonal()**0.5
+            r_freq = 10 ** numpy.nansum(weights * numpy.log10(freqs))
+            popt1, pcov1 = scipy.optimize.curve_fit(tailored_plaw(r_freq),
+                                                    freqs,
+                                                    [_.n for _ in t_majs],
+                                                    sigma=[_.s for _ in t_majs],
+                                                    absolute_sigma=True)
+            std_err1 = pcov1.diagonal() ** 0.5
             gam = uncertainties.ufloat(popt1[0], std_err1[0])
-            tmaj_nu = lambda nu, rf=r_freq, p=popt1, se=std_err1: (nu / rf)**uncertainties.ufloat(p[0], se[0]) * uncertainties.ufloat(p[1], se[1])
+            tmaj_nu = lambda nu, rf=r_freq, p=popt1, se=std_err1: (
+                                                                              nu / rf) ** uncertainties.ufloat(
+                p[0], se[0]) * uncertainties.ufloat(p[1], se[1])
             tmaj_nu.ref_freq = r_freq
             rpr = '('
             rpr += format(popt1[1], '.2e') + "+/-" + format(std_err1[1], '.2e')
@@ -692,10 +1058,11 @@ class Observation:
 
         else:
             gam = uncertainties.ufloat(float('NaN'), float('NaN'))
-            tmaj_nu = lambda nu: uncertainties.ufloat(float('NaN'), float('NaN'))
+            tmaj_nu = lambda nu: uncertainties.ufloat(float('NaN'),
+                                                      float('NaN'))
             tmaj_nu.ref_freq = float('NaN')
             rpr = "float('NaN')"
-        tmaj_nu.__repr__ = rpr        
+        tmaj_nu.__repr__ = rpr
         self.gamma = gam
 
         return tmaj_nu(desired_freq)
@@ -703,14 +1070,14 @@ class Observation:
     def add_flux(self, flux):
         assert type(flux) is Flux, "Added flux must be instance of Flux class"
         self.fluxes.append(flux)
-        
+
     def add_size(self, size):
         assert type(size) is Size, "Added size must be instance of Size class"
         self.sizes.append(size)
 
     def add_coordinate(self, coord):
-        assert type(coord) is Coordinate,\
-               "Added coord must be instance of Coordinate class"
+        assert type(coord) is Coordinate, \
+            "Added coord must be instance of Coordinate class"
         self.coordinates.append(coord)
 
     def plot_fluxes(self, ax=None, errorbars=True, save_pdf=False, log=True,
@@ -731,7 +1098,7 @@ class Observation:
         f_es = numpy.array([_.get_flux().s for _ in self.fluxes])
 
         uplim_mask = numpy.array([_.upper_limit for _ in self.fluxes])
-        
+
         created_ax = False
         if ax is None:
             matplotlib.pylab.close('all')
@@ -740,9 +1107,9 @@ class Observation:
 
         if log:
             ax.set_xscale('log')
-            ax.set_yscale('log')       
+            ax.set_yscale('log')
 
-        # Plot detections
+            # Plot detections
         if errorbars:
             # print(nus[~numpy.array(uplim_mask)])
             ax.errorbar(nus[~numpy.array(uplim_mask)],
@@ -756,12 +1123,12 @@ class Observation:
         # Plot upper-limits of 10% y-axis length
         uls = 0.1 * numpy.ptp(numpy.log10(ax.get_ylim()))
         uls = numpy.log10(fs[numpy.array(uplim_mask)]) - uls
-        uls = fs[numpy.array(uplim_mask)] - 10**uls
+        uls = fs[numpy.array(uplim_mask)] - 10 ** uls
         ax.errorbar(nus[numpy.array(uplim_mask)], fs[numpy.array(uplim_mask)],
                     yerr=uls, uplims=True, **kwargs)
 
         matplotlib.pylab.show()
-        
+
         if save_pdf:
             fig.savefig(save_pdf, dpi=300.)
 
@@ -770,12 +1137,13 @@ class Observation:
         else:
             return nus, fs, f_es, uplim_mask
 
+
 if __name__ == '__main__':
     import astropy.units as u
-    import datetime as dt
-    od = dt.datetime(2015, 4, 12)
-    a = Coordinate(12.4, 0.21, 3, 3.2, 9e9, obs_date=od, unit=(u.rad, u.rad))
-    b = Coordinate(12.3214, 0.21423, 4.53, 3.42, 9e9, unit=(u.rad, u.rad))
-    print(a.obsdate)
-    print(b.obsdate)
 
+    od = datetime(2015, 4, 12)
+    a = Coordinate(12.4, 0.21, 3, 3.2, 9e9, unit=(u.rad, u.rad))
+    b = Coordinate(12.3214, 0.21423, 4.53, 3.42, 9e9, unit=(u.rad, u.rad))
+    f = Flux(3.41e-3, 4.43e-4, 4.5e9, afe=0.05, telescope='VLA', up_lim=False,
+             obs_date=datetime.strptime("15:12:02-22/07/2021",
+                                        "%H:%M:%S-%d/%m/%Y"))

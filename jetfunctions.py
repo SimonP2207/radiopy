@@ -53,8 +53,6 @@ def op_thin_jml(nu, flux, major, minor, dist, inc=uf(57.3, 0.),
     -------
     Jet mass loss rate in M_sol / yr
     """
-    print(nu, flux, major, minor, dist)
-
     nu *= 1E9  # From GHz to Hz
     vel *= 1000.  # km/s to m/s
     flux *= 1E-29  # From mJy to W m^-2 Hz^-1
